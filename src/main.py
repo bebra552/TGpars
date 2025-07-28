@@ -235,6 +235,24 @@ class MembersParserThread(TelegramParserThread):
                 if isinstance(user.status, UserStatusOffline):
                     last_online_str = user.status.was_online.strftime("%Y-%m-%d %H:%M:%S")
 
+                # Participant-specific data
+                participant_obj = getattr(user, 'participant', None)
+                member_status = ''
+                joined_date = ''
+                custom_title = ''
+                if participant_obj:
+                    if isinstance(participant_obj, (types.ChannelParticipantCreator, types.ChatParticipantCreator)):
+                        member_status = 'creator'
+                    elif isinstance(participant_obj, (types.ChannelParticipantAdmin, types.ChatParticipantAdmin)):
+                        member_status = 'administrator'
+                        custom_title = getattr(participant_obj, 'rank', '') or ''
+                    elif isinstance(participant_obj, (types.ChannelParticipantBanned, types.ChatParticipantBanned)):
+                        member_status = 'banned'
+                    else:
+                        member_status = 'member'
+                    if hasattr(participant_obj, 'date') and participant_obj.date:
+                        joined_date = participant_obj.date.strftime("%Y-%m-%d %H:%M:%S")
+
                 parsed_data.append({
                     'ID': user.id,
                     'Username': user.username or '',
@@ -248,6 +266,11 @@ class MembersParserThread(TelegramParserThread):
                     'Is Scam': 'Да' if user.scam else 'Нет',
                     'Is Premium': 'Да' if user.premium else 'Нет',
                     'Is Admin': 'Да' if user.id in admin_ids else 'Нет',
+                    'Language': getattr(user, 'lang_code', '') or '',
+                    'Has Avatar': 'Да' if user.photo else 'Нет',
+                    'Chat Member Status': member_status,
+                    'Joined Date': joined_date,
+                    'Custom Title': custom_title,
                 })
                 if (idx + 1) % 50 == 0:
                     self.progress_signal.emit(f"🔄 Обработано: {idx + 1}/{len(members)}")
@@ -301,13 +324,18 @@ class MessagesParserThread(TelegramParserThread):
             self.progress_signal.emit("📥 Получаю сообщения…")
 
             messages: List[types.Message] = []
-            async for msg in self.client.iter_messages(entity, limit=self.limit):
-                if not self.is_running:
-                    break
-                messages.append(msg)
-                if len(messages) % 50 == 0:
-                    self.progress_signal.emit(f"🔄 Получено сообщений: {len(messages)}")
-                    self.progress_value.emit(len(messages))
+            try:
+                async for msg in self.client.iter_messages(entity, limit=self.limit):
+                    if not self.is_running:
+                        break
+                    messages.append(msg)
+                    await asyncio.sleep(0.05)
+                    if len(messages) % 50 == 0:
+                        self.progress_signal.emit(f"🔄 Получено сообщений: {len(messages)}")
+                        self.progress_value.emit(len(messages))
+            except errors.FloodWaitError as e:
+                self.progress_signal.emit(f"⏳ FloodWait: {e.seconds} сек")
+                await asyncio.sleep(e.seconds)
 
             parsed: List[Dict[str, Any]] = []
             for m in messages:
@@ -365,13 +393,18 @@ class CommentsParserThread(TelegramParserThread):
             self.progress_signal.emit("💬 Получаю комментарии…")
             comments: List[types.Message] = []
 
-            async for reply in self.client.iter_messages(entity, limit=self.limit, reply_to=msg_id):
-                if not self.is_running:
-                    break
-                comments.append(reply)
-                if len(comments) % 50 == 0:
-                    self.progress_signal.emit(f"🔄 Получено комментариев: {len(comments)}")
-                    self.progress_value.emit(min(len(comments), self.limit))
+            try:
+                async for reply in self.client.iter_messages(entity, limit=self.limit, reply_to=msg_id):
+                    if not self.is_running:
+                        break
+                    comments.append(reply)
+                    await asyncio.sleep(0.05)
+                    if len(comments) % 50 == 0:
+                        self.progress_signal.emit(f"🔄 Получено комментариев: {len(comments)}")
+                        self.progress_value.emit(min(len(comments), self.limit))
+            except errors.FloodWaitError as e:
+                self.progress_signal.emit(f"⏳ FloodWait: {e.seconds} сек")
+                await asyncio.sleep(e.seconds)
 
             parsed: List[Dict[str, Any]] = []
             for reply in comments:
@@ -435,7 +468,22 @@ class ReactionsParserThread(TelegramParserThread):
                     reaction=None
                 ))
             except Exception as e:
-                self.error_signal.emit(f"ℹ️ Ошибка получения реакций: {e}")
+                # Fallback: агрегированная информация из message.reactions
+                self.progress_signal.emit("ℹ️ Переходим к агрегированному режиму реакций…")
+                message = await self.client.get_messages(entity, msg_id)
+                if not message or not message.reactions:
+                    self.error_signal.emit(f"ℹ️ У поста нет реакций или недоступно")
+                    return
+                agg = []
+                for rc in message.reactions.results:
+                    emoji = rc.reaction.emoticon if hasattr(rc.reaction, 'emoticon') else '🧩'
+                    recent_ids = []
+                    if message.reactions.recent_reactions:
+                        for rr in message.reactions.recent_reactions:
+                            if getattr(rr.reaction, 'emoticon', None) == emoji:
+                                recent_ids.append(rr.peer_id.user_id)
+                    agg.append({'Emoji': emoji, 'Count': rc.count, 'Recent User IDs': ','.join(map(str, recent_ids))})
+                self.finished_signal.emit(f"Реакции поста #{msg_id}", agg)
                 return
 
             parsed: List[Dict[str, Any]] = []
@@ -540,6 +588,34 @@ class TelegramParserGUI(QMainWindow):
         session_layout.addWidget(session_info)
 
         layout.addWidget(session_group)
+
+        # Информация о собираемых данных
+        data_info_group = QGroupBox("📋 Собираемые данные")
+        data_info_layout = QVBoxLayout(data_info_group)
+        data_info_text = QLabel(
+            "✅ Программа собирает следующие данные:\n"
+            "• ID, Username, имя, фамилия, телефон\n"
+            "• Онлайн-статус, время последнего посещения\n"
+            "• Бот/Verified/Scam/Premium\n"
+            "• Язык, наличие аватара\n"
+            "• Статус участника (админ/модератор/…); дата вступления; кастом-титул\n"
+            "• Режим 'Сообщения' – последние N сообщений\n"
+            "• Режим 'Комментарии' – комментарии к посту\n"
+            "• Режим 'Реакции' – пользователи или агрегированные реакции"
+        )
+        data_info_text.setStyleSheet("color:#333; padding:10px; font-size:12px;")
+        data_info_layout.addWidget(data_info_text)
+        layout.addWidget(data_info_group)
+
+        # Инструкция получения API ID/Hash
+        info_label = QLabel(
+            "ℹ️ Для получения API ID и Hash:\n"
+            "1. Перейдите на https://my.telegram.org\n"
+            "2. Войдите в аккаунт\n"
+            "3. Создайте приложение в разделе API development tools"
+        )
+        info_label.setStyleSheet("color:#666; padding:10px;")
+        layout.addWidget(info_label)
 
         layout.addStretch()
 
@@ -663,7 +739,15 @@ class TelegramParserGUI(QMainWindow):
     def fill_results_table(self, data: List[Dict[str, Any]]):
         if not data:
             return
+
         headers = list(data[0].keys())
+
+        # Если Last Online везде «Скрыто» – убираем колонку
+        if 'Last Online' in headers and all(item.get('Last Online', 'Скрыто') == 'Скрыто' for item in data):
+            headers.remove('Last Online')
+            for item in data:
+                item.pop('Last Online', None)
+
         self.results_table.setColumnCount(len(headers))
         self.results_table.setRowCount(len(data))
         self.results_table.setHorizontalHeaderLabels(headers)
@@ -675,15 +759,25 @@ class TelegramParserGUI(QMainWindow):
     def save_csv(self):
         if not self.parsed_data:
             return
+
+        # deep copy to avoid mutating original
+        data = [dict(item) for item in self.parsed_data]
+        headers = list(data[0].keys())
+
+        if 'Last Online' in headers and all(i.get('Last Online', 'Скрыто') == 'Скрыто' for i in data):
+            headers.remove('Last Online')
+            for i in data:
+                i.pop('Last Online', None)
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         default_name = f"telegram_parsed_{timestamp}.csv"
         filename, _ = QFileDialog.getSaveFileName(self, "Сохранить CSV", os.path.join(self.save_path_input.text(), default_name), "CSV files (*.csv)")
         if filename:
             try:
                 with open(filename, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.DictWriter(f, fieldnames=list(self.parsed_data[0].keys()))
+                    writer = csv.DictWriter(f, fieldnames=headers)
                     writer.writeheader()
-                    writer.writerows(self.parsed_data)
+                    writer.writerows(data)
                 QMessageBox.information(self, "Успех", f"Файл сохранен: {filename}")
             except Exception as e:
                 QMessageBox.critical(self, "Ошибка", str(e))
