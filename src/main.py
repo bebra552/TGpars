@@ -18,12 +18,22 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
-# Telethon
+# Telethon core
 from telethon import TelegramClient, errors, functions, types
+# Explicit TL types
+from telethon.tl import types as tl
+
 from telethon.tl.types import (
     UserStatusOnline, UserStatusOffline, UserStatusRecently,
-    UserStatusLastWeek, UserStatusLastMonth, UserStatusEmpty
+    UserStatusLastWeek, UserStatusLastMonth, UserStatusEmpty,
+    ChannelParticipantCreator, ChannelParticipantAdmin, ChannelParticipantBanned
 )
+
+# Some group types may be missing in certain Telethon builds; provide safe fallbacks
+ChatParticipantCreator = getattr(tl, 'ChatParticipantCreator', None)
+ChatParticipantAdmin = getattr(tl, 'ChatParticipantAdmin', None)
+ChatParticipantBanned = getattr(tl, 'ChatParticipantBanned', None)
+ChannelParticipantsAdmins = tl.ChannelParticipantsAdmins
 
 import re
 
@@ -200,7 +210,7 @@ class MembersParserThread(TelegramParserThread):
             # Получаем список администраторов, чтобы быстро определять Is Admin
             admin_ids: set[int] = set()
             try:
-                async for adm in self.client.iter_participants(entity, filter=types.ChannelParticipantsAdmins, aggressive=True):
+                async for adm in self.client.iter_participants(entity, filter=ChannelParticipantsAdmins, aggressive=True):
                     admin_ids.add(adm.id)
             except Exception:
                 pass  # Если не удалось – оставим список пустым
@@ -241,12 +251,12 @@ class MembersParserThread(TelegramParserThread):
                 joined_date = ''
                 custom_title = ''
                 if participant_obj:
-                    if isinstance(participant_obj, (types.ChannelParticipantCreator, types.ChatParticipantCreator)):
+                    if isinstance(participant_obj, (ChannelParticipantCreator, ChatParticipantCreator)):
                         member_status = 'creator'
-                    elif isinstance(participant_obj, (types.ChannelParticipantAdmin, types.ChatParticipantAdmin)):
+                    elif isinstance(participant_obj, (ChannelParticipantAdmin, ChatParticipantAdmin)):
                         member_status = 'administrator'
                         custom_title = getattr(participant_obj, 'rank', '') or ''
-                    elif isinstance(participant_obj, (types.ChannelParticipantBanned, types.ChatParticipantBanned)):
+                    elif isinstance(participant_obj, (ChannelParticipantBanned, ChatParticipantBanned)):
                         member_status = 'banned'
                     else:
                         member_status = 'member'
