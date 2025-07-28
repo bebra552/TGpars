@@ -197,9 +197,17 @@ class MembersParserThread(TelegramParserThread):
             self.progress_signal.emit(f"📊 Группа: {getattr(entity, 'title', '')}")
             self.progress_signal.emit(f"👥 Участников: {members_count}")
 
+            # Получаем список администраторов, чтобы быстро определять Is Admin
+            admin_ids: set[int] = set()
+            try:
+                async for adm in self.client.iter_participants(entity, filter=types.ChannelParticipantsAdmins, aggressive=True):
+                    admin_ids.add(adm.id)
+            except Exception:
+                pass  # Если не удалось – оставим список пустым
+
             # iterate participants
             members: List[types.User] = []
-            async for user in self.client.iter_participants(entity, limit=self.limit):
+            async for user in self.client.iter_participants(entity, limit=self.limit, aggressive=True):
                 if not self.is_running:
                     break
                 members.append(user)
@@ -211,6 +219,11 @@ class MembersParserThread(TelegramParserThread):
             for idx, user in enumerate(members):
                 if not self.is_running:
                     break
+                # Формируем last_online
+                last_online_str = ''
+                if isinstance(user.status, UserStatusOffline):
+                    last_online_str = user.status.was_online.strftime("%Y-%m-%d %H:%M:%S")
+
                 parsed_data.append({
                     'ID': user.id,
                     'Username': user.username or '',
@@ -218,13 +231,12 @@ class MembersParserThread(TelegramParserThread):
                     'Last Name': user.last_name or '',
                     'Phone': user.phone or '',
                     'Status': get_user_status_text(user.status),
-                    'Last Online': getattr(user.status, 'was_online', None).strftime("%Y-%m-%d %H:%M:%S") if isinstance(user.status, UserStatusOffline) else 'Скрыто',
+                    'Last Online': last_online_str or 'Скрыто',
                     'Is Bot': 'Да' if user.bot else 'Нет',
                     'Is Verified': 'Да' if user.verified else 'Нет',
                     'Is Scam': 'Да' if user.scam else 'Нет',
                     'Is Premium': 'Да' if user.premium else 'Нет',
-                    # Telethon does not directly expose admin flag via participant in iter_participants
-                    'Is Admin': 'Неизвестно',
+                    'Is Admin': 'Да' if user.id in admin_ids else 'Нет',
                 })
                 if (idx + 1) % 50 == 0:
                     self.progress_signal.emit(f"🔄 Обработано: {idx + 1}/{len(members)}")
@@ -504,6 +516,20 @@ class TelegramParserGUI(QMainWindow):
 
         layout.addWidget(parse_group)
 
+        # ------ Управление сессией ------
+        session_group = QGroupBox("🔐 Управление сессией")
+        session_layout = QVBoxLayout(session_group)
+
+        self.clear_session_btn = QPushButton("🗑️ Очистить сессию (повторная авторизация)")
+        self.clear_session_btn.clicked.connect(self.clear_session)
+        session_layout.addWidget(self.clear_session_btn)
+
+        session_info = QLabel("💡 Сессия сохраняется между запусками. Очистите её, если нужно войти под другим аккаунтом.")
+        session_info.setStyleSheet("color: #666; padding: 5px;")
+        session_layout.addWidget(session_info)
+
+        layout.addWidget(session_group)
+
         layout.addStretch()
 
     def setup_parser_tab(self):
@@ -727,6 +753,14 @@ class TelegramParserGUI(QMainWindow):
             self.parser_thread.stop()
             self.parser_thread.wait(3000)
         event.accept()
+
+    def clear_session(self):
+        try:
+            for file in Path.cwd().glob(f"{self.session_name}*.session*"):
+                file.unlink()
+            QMessageBox.information(self, "Успех", "Сессия очищена. При следующем парсинге потребуется повторная авторизация.")
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось очистить сессию: {e}")
 
 
 # ----------------------------------------------------------------------------
