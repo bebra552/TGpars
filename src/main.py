@@ -207,13 +207,24 @@ class MembersParserThread(TelegramParserThread):
 
             # iterate participants
             members: List[types.User] = []
-            async for user in self.client.iter_participants(entity, limit=self.limit, aggressive=True):
-                if not self.is_running:
-                    break
-                members.append(user)
-                if len(members) % 50 == 0:
-                    self.progress_signal.emit(f"📥 Получено участников: {len(members)}")
-                    self.progress_value.emit(min(len(members), self.limit))
+            try:
+                async for user in self.client.iter_participants(entity, limit=self.limit, aggressive=True):
+                    if not self.is_running:
+                        break
+                    members.append(user)
+
+                    # Небольшая пауза, чтобы снизить нагрузку на API
+                    await asyncio.sleep(0.1)
+
+                    if len(members) % 50 == 0:
+                        self.progress_signal.emit(f"📥 Получено участников: {len(members)}")
+                        self.progress_value.emit(min(len(members), self.limit))
+            except errors.FloodWaitError as e:
+                if self.is_running:
+                    self.progress_signal.emit(f"⏳ FloodWait: ожидание {e.seconds} сек")
+                    await asyncio.sleep(e.seconds)
+                    # Можно попробовать продолжить после паузы (рекурсивно)
+                    # но для простоты завершаем сбор текущим результатом
 
             parsed_data: List[Dict[str, Any]] = []
             for idx, user in enumerate(members):
