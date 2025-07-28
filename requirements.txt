@@ -1,3 +1,4 @@
 PyQt6==6.6.1
-pyrogram @ git+https://github.com/pyrogram/pyrogram@master
+Telethon==1.34.0
+cryptg==0.4.7
 TgCrypto==1.2.5
