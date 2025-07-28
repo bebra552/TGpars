@@ -22,7 +22,7 @@ from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from telethon import TelegramClient, errors, functions, types
 from telethon.tl.types import (
     UserStatusOnline, UserStatusOffline, UserStatusRecently,
-    UserStatusLastWeek, UserStatusLastMonth, UserStatusLongAgo
+    UserStatusLastWeek, UserStatusLastMonth, UserStatusEmpty
 )
 
 import re
@@ -45,9 +45,10 @@ def get_user_status_text(status_obj: types.TypeUserStatus | None) -> str:
         return "Был на этой неделе"
     if isinstance(status_obj, UserStatusLastMonth):
         return "Был в этом месяце"
-    if isinstance(status_obj, UserStatusLongAgo):
-        return "Давно"
-    return "Скрыто"
+    if isinstance(status_obj, UserStatusEmpty):
+        return "Скрыто"
+    # Для неизвестных статусов (старых, удалённых) выводим «Давно»
+    return "Давно"
 
 
 # ----------------------------------------------------------------------------
